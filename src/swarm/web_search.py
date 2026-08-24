@@ -40,22 +40,36 @@ def search_web(query: str, max_results: int = 8) -> list[dict]:
 
 
 def fetch_page_text(url: str, max_chars: int = MAX_PAGE_CHARS) -> str:
-    """Fetch a URL and extract main text content."""
-    if not _is_safe_url(url):
-        logger.debug("Blocked SSRF attempt: %s", url)
-        return ""
-    try:
-        import httpx
-        import trafilatura
+    """Fetch a URL and extract main text content with redirect SSRF protection."""
+    import httpx
+    import trafilatura
+    from urllib.parse import urljoin
 
+    current_url = url
+    max_redirects = 3
+
+    try:
         with httpx.Client(
             timeout=15,
-            follow_redirects=True,
+            follow_redirects=False,
             headers={"User-Agent": "Mozilla/5.0 (compatible; Irys/1.0)"},
         ) as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-            html = resp.text
+            for _ in range(max_redirects + 1):
+                if not _is_safe_url(current_url):
+                    logger.debug("Blocked SSRF attempt: %s", current_url)
+                    return ""
+
+                resp = client.get(current_url)
+                if resp.is_redirect and "location" in resp.headers:
+                    current_url = urljoin(current_url, resp.headers["location"])
+                    continue
+
+                resp.raise_for_status()
+                html = resp.text
+                break
+            else:
+                logger.debug("Too many redirects fetching %s", url)
+                return ""
 
         text = trafilatura.extract(
             html, include_links=False, include_comments=False,
@@ -64,7 +78,6 @@ def fetch_page_text(url: str, max_chars: int = MAX_PAGE_CHARS) -> str:
     except Exception as e:
         logger.debug("Failed to fetch %s: %s", url, e)
         return ""
-
 
 def search_and_browse(query: str, *, max_pages: int = MAX_PAGES_PER_SEARCH) -> str:
     """Search DDG + fetch top page contents. Returns formatted text block."""
